@@ -16,5 +16,5 @@
 
 &pm660_charger {
 	fih,dcp-2a-function-enable;
-	fih,lcm-on-off-cur-control;
+//	fih,lcm-on-off-cur-control;
 };

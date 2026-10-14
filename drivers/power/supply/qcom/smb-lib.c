@@ -5241,32 +5241,17 @@ static void lcm_cur_ctrl_work(struct work_struct *work)
 
 		if((chip->is_lcm_on))
 		{
-			if(chip->is_ambient_display == false)
+			/* Screen is on: maintain HVDCP (Quick Charge) and full input current */
+			if(cable_voltage < FIH_LCM_VBUS_THRESHOLD)
 			{
-				if(cable_voltage >= FIH_LCM_VBUS_THRESHOLD)
+				if(!stat)
 				{
-					if(stat)
-					{
-						smblib_masked_write(chip, USBIN_OPTIONS_1_CFG_REG, HVDCP_EN_BIT, 0);
-						sts_change = true;
-					}
+					smblib_masked_write(chip, USBIN_OPTIONS_1_CFG_REG, HVDCP_EN_BIT, HVDCP_EN_BIT);
+					sts_change = true;
 				}
-				if(ICL != FIH_LCM_ICL_MIN)
-					vote(chip->usb_icl_votable, LCM_LIMIT_ICL_VOTER, true, FIH_LCM_ICL_MIN);
 			}
-			else
-			{
-				if(cable_voltage < FIH_LCM_VBUS_THRESHOLD)
-				{
-					if(!stat)
-					{
-						smblib_masked_write(chip, USBIN_OPTIONS_1_CFG_REG, HVDCP_EN_BIT, HVDCP_EN_BIT);
-						sts_change = true;
-					}
-				}
-				if(ICL != FIH_LCM_ICL_MAX)
-					vote(chip->usb_icl_votable, LCM_LIMIT_ICL_VOTER, true, FIH_LCM_ICL_MAX);
-			}
+			if(ICL != FIH_LCM_ICL_MAX)
+				vote(chip->usb_icl_votable, LCM_LIMIT_ICL_VOTER, true, FIH_LCM_ICL_MAX);
 		}
 		else if(!chip->is_lcm_on)
 		{
@@ -5829,8 +5814,8 @@ int smblib_post_init(struct smb_charger *chg)
 
 	if(chg->fih_lcm_on_off_cur_control)
 	{
-		chg->fih_qc_control_disable_mode = 1;
-		schedule_delayed_work(&chg->lcm_cur_ctrl_work, 0);
+		/* Option A: Disable screen-on QC throttling and do not schedule aggressive ICL limiter */
+		chg->fih_qc_control_disable_mode = 0;
 	}
 
 	smblib_set_sw_jeita_comp(chg); // add for SW jeita

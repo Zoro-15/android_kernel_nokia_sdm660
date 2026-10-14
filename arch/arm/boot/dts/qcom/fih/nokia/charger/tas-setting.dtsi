@@ -18,7 +18,7 @@
 
 &pm660_charger {
 	fih,dcp-2a-function-enable;
-	fih,lcm-on-off-cur-control;
+//	fih,lcm-on-off-cur-control;
 	/* TEMP_LOW	TEMP_HIGH	FV */
 	qcom,jeita-fv-cfg = <0 157 4400000>,
 					<158 440 4400000>,
