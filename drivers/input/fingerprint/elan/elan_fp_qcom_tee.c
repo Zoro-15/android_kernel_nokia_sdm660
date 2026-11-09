@@ -232,7 +232,7 @@ static long elan_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
             }
             else if(wake_lock_arg)
             {
-                wake_lock(&fp->hal_wake_lock);
+                wake_lock_timeout(&fp->hal_wake_lock, msecs_to_jiffies(10000));
                 ELAN_DEBUG("[IOCTL] HAL WAKE LOCK = %d", wake_lock_arg);
             }
             else
