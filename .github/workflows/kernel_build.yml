@@ -1,0 +1,189 @@
+name: Build Nokia 6.1 (PL2) Android 10 Kernel & Boot Image
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - lineage-17.1
+      - ci-build
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build A10 Kernel & Assemble Boot Image
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout Kernel Source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30
+          sudo apt-get install -y -o Acquire::Retries=3 -o Acquire::http::Timeout=30 \
+            bc bison flex libssl-dev libelf-dev lz4 python3 python3-pip zip cpio \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi libncurses5 libtinfo5
+
+      - name: Setup Proton Clang Toolchain
+        run: |
+          echo "Cloning Proton Clang toolchain..."
+          git clone --depth=1 https://github.com/kdrag0n/proton-clang.git "$GITHUB_WORKSPACE/clang"
+
+      - name: Build Kernel (Image.gz-dtb)
+        run: |
+          set -e -x -o pipefail
+          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export CC=clang
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          export KCFLAGS="-Wno-error"
+
+          rm -rf out
+          mkdir -p out
+
+          # Configure with nokia_defconfig
+          make -j$(nproc --all) O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- nokia_defconfig
+
+          # Compile Image.gz-dtb (kernel with appended Qualcomm DTBs)
+          make -j$(nproc --all) O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- KCFLAGS="-Wno-error" Image.gz-dtb 2>&1 | tee build.log
+
+      - name: Assemble Artifacts
+        run: |
+          mkdir -p artifacts
+          if [ ! -f out/arch/arm64/boot/Image.gz-dtb ]; then
+            echo "ERROR: out/arch/arm64/boot/Image.gz-dtb not found!" && exit 1
+          fi
+          cp out/arch/arm64/boot/Image.gz-dtb artifacts/Image.gz-dtb
+          cp out/arch/arm64/boot/Image.gz artifacts/Image.gz 2>/dev/null || true
+          echo "Kernel compiled successfully:"
+          ls -lh artifacts/
+
+      - name: Package AnyKernel3 Flashable Zip
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+          sed -i 's/device.name1=.*/device.name1=PL2/g' AnyKernel3/anykernel.sh
+          sed -i 's/device.name2=.*/device.name2=PL2_sprout/g' AnyKernel3/anykernel.sh
+          sed -i 's/device.name3=.*/device.name3=B2N/g' AnyKernel3/anykernel.sh
+          sed -i 's/device.name4=.*/device.name4=B2N_sprout/g' AnyKernel3/anykernel.sh
+          sed -i 's/device.name5=.*/device.name5=Plate2/g' AnyKernel3/anykernel.sh
+
+          cp artifacts/Image.gz-dtb AnyKernel3/Image.gz-dtb
+
+          cd AnyKernel3
+          zip -r9 ../artifacts/Nokia_PL2_A10_Kernel.zip * -x .git README.md
+          cd ..
+
+      - name: Package Flashable boot.img with mkbootimg
+        run: |
+          # Fetch official LineageOS mkbootimg tool
+          curl -sL https://raw.githubusercontent.com/LineageOS/android_system_tools_mkbootimg/lineage-18.1/mkbootimg.py -o mkbootimg.py
+
+          # Extract or copy ramdisk
+          if [ -f "prebuilts/ramdisk.cpio" ]; then
+            echo "Using prebuilt recovery ramdisk from prebuilts/ramdisk.cpio..."
+            cp prebuilts/ramdisk.cpio ramdisk.cpio
+          elif [ -f "prebuilts/boot.img" ]; then
+            echo "Extracting ramdisk from prebuilts/boot.img..."
+            curl -sL https://raw.githubusercontent.com/LineageOS/android_system_tools_mkbootimg/lineage-18.1/unpack_bootimg.py -o unpack_bootimg.py
+            python3 unpack_bootimg.py --boot_img prebuilts/boot.img --out unpacked_boot
+            cp unpacked_boot/ramdisk ramdisk.cpio
+          else
+            echo "ERROR: Neither prebuilts/ramdisk.cpio nor prebuilts/boot.img found!" && exit 1
+          fi
+
+          # CMDLINE from Nokia 6.1 LineageOS 17.1 (sleep_disabled omitted for proper low-power deep sleep)
+          CMDLINE="console=ttyMSM0,115200,n8 androidboot.console=ttyMSM0 earlycon=msm_serial_dm,0xc170000 androidboot.hardware=qcom msm_rtb.filter=0x37 ehci-hcd.park=3 sched_enable_hmp=1 sched_enable_power_aware=1 service_locator.enable=1 swiotlb=1 androidboot.configfs=true androidboot.usbconfigfs=true androidboot.usbcontroller=a800000.dwc3 loop.max_part=7 buildvariant=userdebug veritykeyid=id:"
+
+          # Package Header Version 0 Boot Image
+          python3 mkbootimg.py \
+            --kernel artifacts/Image.gz-dtb \
+            --ramdisk ramdisk.cpio \
+            --base 0x00000000 \
+            --pagesize 4096 \
+            --kernel_offset 0x00008000 \
+            --ramdisk_offset 0x01000000 \
+            --tags_offset 0x00000100 \
+            --second_offset 0x00f00000 \
+            --header_version 0 \
+            --cmdline "$CMDLINE" \
+            --os_version 10.0.0 \
+            --os_patch_level 2023-02 \
+            -o artifacts/boot.img
+
+          if [ ! -s "artifacts/boot.img" ]; then
+            echo "ERROR: Failed to produce artifacts/boot.img!" && exit 1
+          fi
+
+          echo "Generated flashable boot.img successfully:"
+          ls -lh artifacts/boot.img
+
+      - name: Extract & Display Build Errors
+        if: failure()
+        run: |
+          mkdir -p build_logs
+          echo "### ❌ Build Failed — Error Summary" >> $GITHUB_STEP_SUMMARY
+          echo '```text' >> $GITHUB_STEP_SUMMARY
+          if [ -f build.log ]; then
+            grep -iE "error:|fatal error:|recipe for target.*failed" build.log | tail -n 50 > build_logs/errors_summary.txt || true
+            cat build_logs/errors_summary.txt >> $GITHUB_STEP_SUMMARY
+            gzip -c build.log > build_logs/build.log.gz
+          else
+            echo "No build.log found" > build_logs/errors_summary.txt
+            cat build_logs/errors_summary.txt >> $GITHUB_STEP_SUMMARY
+          fi
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload Build Log Artifacts on Failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-failure-logs
+          path: build_logs/
+          retention-days: 1
+
+      - name: Upload Artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nokia-PL2-A10-Kernel-Artifacts
+          path: |
+            artifacts/boot.img
+            artifacts/Image.gz-dtb
+            artifacts/Nokia_PL2_A10_Kernel.zip
+            build.log
+          retention-days: 7
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: success()
+        with:
+          tag_name: PL2-A10-Kernel-v${{ github.run_number }}
+          name: Nokia 6.1 (PL2) LineageOS 17.1 Kernel & Boot Image #${{ github.run_number }}
+          body: |
+            ## Nokia 6.1 (PL2) LineageOS 17.1 (Android 10) Kernel Build #${{ github.run_number }}
+
+            Target: Qualcomm Snapdragon 630 (`sdm630`) — Nokia 6.1 (`PL2`).
+            Kernel: Linux 4.4 (branch `${{ github.ref_name }}`, commit `${{ github.sha }}`).
+
+            ### Included Fixes & Features:
+            - **Droidspaces Support**: Full Namespaces (`PID_NS`, `IPC_NS`, `UTS_NS`, `USER_NS`), Cgroups (`MEMCG`, `CFS_BANDWIDTH`, `CGROUP_PIDS`), `devtmpfs`, `VETH`, and `MACVLAN`.
+            - **Standby Battery Drain Fix**: `hal_fp_wake_lock` safety timeout prevents 20-hour sleep locks.
+            - **Power Idle**: `lpm_levels.sleep_disabled=1` stripped from boot cmdline.
+
+            ### Flashable Artifacts:
+            - **`boot.img`**: Flashable Fastboot boot image (`fastboot flash boot boot.img`).
+            - **`Nokia_PL2_A10_Kernel.zip`**: AnyKernel3 package for TWRP / OrangeFox recovery flash.
+            - **`Image.gz-dtb`**: Raw kernel binary with appended Qualcomm device tree blobs.
+          files: |
+            artifacts/boot.img
+            artifacts/Image.gz-dtb
+            artifacts/Nokia_PL2_A10_Kernel.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
